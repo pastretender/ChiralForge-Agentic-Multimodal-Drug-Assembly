@@ -1,0 +1,35 @@
+name: mfm_drug_gen
+channels:
+  - pytorch
+  - nvidia
+  - conda-forge
+  - defaults
+dependencies:
+  - python=3.11
+  - pytorch=2.6.0
+  - torchvision
+  - torchaudio
+  - pytorch-cuda=12.4
+  - rdkit
+  - pip
+  - pip:
+      # Geometric Deep Learning (avoiding torch_scatter, using native PyTorch scatter)
+      - torch-geometric
+      - pyg-lib -f https://data.pyg.org/whl/torch-2.6.0+cu124.html
+      - e3nn
+
+      # Multimodal & Transformers
+      - timm
+      - transformers
+
+      # Deep Learning Infrastructure & Strict Typing
+      - pytorch-lightning
+      - jaxtyping
+      - einops
+
+      # Datasets & Cheminformatics metrics
+      - ogb
+
+      # Orchestration / Agentic Workflow
+      - langchain
+      - llama-index

@@ -1,0 +1,26 @@
+# Deep Learning Core
+torch==2.6.0
+torchvision
+torchaudio
+
+# Geometric Deep Learning (Pinned to avoid compilation errors)
+torch-geometric
+e3nn
+
+# Multimodal & Transformers
+timm
+transformers
+
+# Architecture & Types
+einops
+jaxtyping
+pytorch-lightning
+
+# Cheminformatics & Datasets
+rdkit
+ogb
+
+# Agent Orchestrator
+langchain
+langchain-core
+langchain-openai
