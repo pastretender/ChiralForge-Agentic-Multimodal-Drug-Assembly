@@ -74,26 +74,19 @@ class HCSViTEncoder(nn.Module):
 class CrossModalFusionModule(nn.Module):
     """
     Merges c_struct and c_pheno into a unified conditioning vector c
-    via cross-attention mechanisms.
+    via an MLP mapping.
     """
     def __init__(self, hidden_dim: int = 256, num_heads: int = 4):
         super().__init__()
         self.hidden_dim = hidden_dim
 
-        self.cross_attn = nn.MultiheadAttention(
-            embed_dim=hidden_dim,
-            num_heads=num_heads,
-            batch_first=True
-        )
-
-        self.norm1 = nn.LayerNorm(hidden_dim)
-        self.norm2 = nn.LayerNorm(hidden_dim)
-
-        self.ffn = nn.Sequential(
-            nn.Linear(hidden_dim, hidden_dim * 4),
+        self.mlp = nn.Sequential(
+            nn.Linear(hidden_dim * 2, hidden_dim * 2),
             nn.GELU(),
-            nn.Linear(hidden_dim * 4, hidden_dim)
+            nn.Linear(hidden_dim * 2, hidden_dim)
         )
+
+        self.norm = nn.LayerNorm(hidden_dim)
 
     def forward(
         self,
@@ -101,25 +94,12 @@ class CrossModalFusionModule(nn.Module):
         c_pheno: Float[torch.Tensor, "batch hidden_dim"]
     ) -> Float[torch.Tensor, "batch hidden_dim"]:
 
-        # STRICT REQUIREMENT: einops used to introduce sequence dimension for Attention
-        # Shape transforms from [batch, hidden_dim] -> [batch, 1, hidden_dim]
-        q = einops.rearrange(c_struct, 'b d -> b 1 d')
-        k = einops.rearrange(c_pheno, 'b d -> b 1 d')
-        v = k  # Using phenotype as context
+        # Concatenate structure and phenotype representations
+        merged = torch.cat([c_struct, c_pheno], dim=-1)
 
-        # Cross-Attention: Structure queries Phenotype
-        attn_out, _ = self.cross_attn(query=q, key=k, value=v)
-
-        # Residual connection and LayerNorm
-        out = self.norm1(q + attn_out)
-
-        # Feed-Forward Network
-        ffn_out = self.ffn(out)
-        out = self.norm2(out + ffn_out)
-
-        # STRICT REQUIREMENT: einops used to squeeze sequence dimension back out
-        # Shape transforms from [batch, 1, hidden_dim] -> [batch, hidden_dim]
-        c_fused = einops.rearrange(out, 'b 1 d -> b d')
+        # Map back to hidden_dim
+        c_fused = self.mlp(merged)
+        c_fused = self.norm(c_fused)
 
         return c_fused
 

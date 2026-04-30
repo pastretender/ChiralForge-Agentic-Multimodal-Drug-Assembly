@@ -23,6 +23,7 @@ class CryoEMDataset(Dataset):
 
         self._ensure_data_exists(num_mock_samples)
         self.file_paths = sorted(glob.glob(os.path.join(self.data_dir, "*.pt")))
+        self.data_cache = [torch.load(p, weights_only=True).to(torch.float32) for p in self.file_paths]
 
     def _ensure_data_exists(self, num_samples: int):
         """Fail-Safe: Generates dummy 3D voxel grids to disk if none exist."""
@@ -39,12 +40,7 @@ class CryoEMDataset(Dataset):
         return len(self.file_paths)
 
     def __getitem__(self, idx: int) -> Float[torch.Tensor, "channels depth height width"]:
-        # Strict typing enforcement for the returned 3D tensor
-        tensor_path = self.file_paths[idx]
-        data: Float[torch.Tensor, "channels depth height width"] = torch.load(
-            tensor_path, weights_only=True
-        ).to(torch.float32)
-        return data
+        return self.data_cache[idx]
 
 
 # =============================================================================
@@ -66,6 +62,7 @@ class HCSDataset(Dataset):
 
         self._ensure_data_exists(num_mock_samples)
         self.file_paths = sorted(glob.glob(os.path.join(self.data_dir, "*.pt")))
+        self.data_cache = [torch.load(p, weights_only=True).to(torch.float32) for p in self.file_paths]
 
     def _ensure_data_exists(self, num_samples: int):
         """Fail-Safe: Generates dummy multi-channel 2D images to disk if none exist."""
@@ -82,12 +79,7 @@ class HCSDataset(Dataset):
         return len(self.file_paths)
 
     def __getitem__(self, idx: int) -> Float[torch.Tensor, "channels height width"]:
-        # Strict typing enforcement for the returned 2D tensor
-        tensor_path = self.file_paths[idx]
-        data: Float[torch.Tensor, "channels height width"] = torch.load(
-            tensor_path, weights_only=True
-        ).to(torch.float32)
-        return data
+        return self.data_cache[idx]
 
 
 # =============================================================================
@@ -117,6 +109,7 @@ class PairedMultimodalDataset(Dataset):
     """
     Synchronized dataset ensuring Cryo-EM maps and HCS images
     are strictly paired by their index/target ID.
+    Pre-loads data into RAM to avoid I/O bottlenecks during __getitem__.
     """
     def __init__(self, cryo_dir: str = "./data/cryo_em", hcs_dir: str = "./data/hcs_images", num_mock_samples: int = 10):
         super().__init__()
@@ -131,6 +124,10 @@ class PairedMultimodalDataset(Dataset):
 
         assert len(self.cryo_paths) == len(self.hcs_paths), "Mismatch between Cryo-EM and HCS file counts!"
 
+        # Pre-load entirely into memory
+        self.cryo_data = [torch.load(p, weights_only=True).to(torch.float32) for p in self.cryo_paths]
+        self.hcs_data = [torch.load(p, weights_only=True).to(torch.float32) for p in self.hcs_paths]
+
     def _ensure_mock_data(self, num_samples: int):
         os.makedirs(self.cryo_dir, exist_ok=True)
         os.makedirs(self.hcs_dir, exist_ok=True)
@@ -144,9 +141,7 @@ class PairedMultimodalDataset(Dataset):
         return len(self.cryo_paths)
 
     def __getitem__(self, idx: int) -> tuple[Float[torch.Tensor, "c d h w"], Float[torch.Tensor, "c h w"]]:
-        cryo_data = torch.load(self.cryo_paths[idx], weights_only=True).to(torch.float32)
-        hcs_data = torch.load(self.hcs_paths[idx], weights_only=True).to(torch.float32)
-        return cryo_data, hcs_data
+        return self.cryo_data[idx], self.hcs_data[idx]
 
 def get_paired_dataloader(batch_size: int = 4) -> DataLoader:
     dataset = PairedMultimodalDataset()

@@ -19,9 +19,9 @@ def load_module_from_file(module_name: str, file_path: str):
     return module
 
 try:
-    mod_enc = load_module_from_file("mod_enc", "02_multimodal_encoders.py")
-    mod_data = load_module_from_file("mod_data", "03_data_pipeline.py")
-    mod_cfm = load_module_from_file("mod_cfm", "04_flow_matching_engine.py")
+    mod_enc = load_module_from_file("mod_enc", os.path.join(os.path.dirname(__file__), "multimodal_encoders.py"))
+    mod_data = load_module_from_file("mod_data", os.path.join(os.path.dirname(__file__), "data_pipeline.py"))
+    mod_cfm = load_module_from_file("mod_cfm", os.path.join(os.path.dirname(__file__), "flow_matching_engine.py"))
 except FileNotFoundError as e:
     print(f"Initialization Error: {e}")
     sys.exit(1)
@@ -74,6 +74,9 @@ def train_end_to_end(num_epochs: int = 5, batch_size: int = 4, hidden_dim: int =
     # This triggers the fail-safe mock data generation if real data isn't present
     cryo_loader, hcs_loader = get_multimodal_dataloaders(batch_size=batch_size)
 
+    # Initialize GradScaler for mixed precision training
+    scaler = torch.amp.GradScaler()
+
     print("=" * 60)
     print("🚀 STARTING TRAINING LOOP")
     print("=" * 60)
@@ -96,43 +99,46 @@ def train_end_to_end(num_epochs: int = 5, batch_size: int = 4, hidden_dim: int =
 
             optimizer.zero_grad()
 
-            # --- FORWARD PASS: Context & Encoders ---
-            # 1. Extract structural conditioning
-            c_struct = cryo_encoder(cryo_batch)
+            with torch.autocast(device_type='cuda', dtype=torch.float16):
+                # --- FORWARD PASS: Context & Encoders ---
+                # 1. Extract structural conditioning
+                c_struct = cryo_encoder(cryo_batch)
 
-            # 2. Extract phenotypic conditioning
-            c_pheno = hcs_encoder(hcs_batch)
+                # 2. Extract phenotypic conditioning
+                c_pheno = hcs_encoder(hcs_batch)
 
-            # 3. Cross-modal fusion into unified vector c
-            c_fused = fusion_module(c_struct, c_pheno)
+                # 3. Cross-modal fusion into unified vector c
+                c_fused = fusion_module(c_struct, c_pheno)
 
-            # INNOVATION PATCH: 10% Unconditional Dropout for CFG
-            if torch.rand(1).item() < 0.1:
-                c_fused = torch.zeros_like(c_fused)
+                # INNOVATION PATCH: 10% Unconditional Dropout for CFG
+                if torch.rand(1).item() < 0.1:
+                    c_fused = torch.zeros_like(c_fused)
 
-            # --- FORWARD PASS: Generative Engine ---
-            # Fetch a geometric target graph batch.
-            # In a full pipeline, these would be the ground truth molecules paired with the cryo/hcs data.
-            # Here, we use the mock generator from script 04 to simulate target topologies.
-            current_batch_size = c_fused.shape[0]
-            mol_batch, _ = get_mock_batch_and_context(
-                num_graphs=current_batch_size,
-                nodes_per_graph=12,
-                in_dim=9,
-                c_dim=hidden_dim
-            )
-            mol_batch = mol_batch.to(device)
+                # --- FORWARD PASS: Generative Engine ---
+                # Fetch a geometric target graph batch.
+                # In a full pipeline, these would be the ground truth molecules paired with the cryo/hcs data.
+                # Here, we use the mock generator from script 04 to simulate target topologies.
+                current_batch_size = c_fused.shape[0]
+                mol_batch, _ = get_mock_batch_and_context(
+                    num_graphs=current_batch_size,
+                    nodes_per_graph=12,
+                    in_dim=9,
+                    c_dim=hidden_dim
+                )
+                mol_batch = mol_batch.to(device)
 
-            # 4. Compute Conditional Flow Matching Loss
-            loss = flow_matcher.compute_cfm_loss(batch=mol_batch, c=c_fused)
+                # 4. Compute Conditional Flow Matching Loss
+                loss = flow_matcher.compute_cfm_loss(batch=mol_batch, c=c_fused)
 
             # --- BACKWARD PASS & OPTIMIZATION ---
-            loss.backward()
+            scaler.scale(loss).backward()
 
             # Gradient clipping to stabilize deep geometric/multimodal architectures
+            scaler.unscale_(optimizer)
             torch.nn.utils.clip_grad_norm_(all_parameters, max_norm=1.0)
 
-            optimizer.step()
+            scaler.step(optimizer)
+            scaler.update()
 
             # --- LOGGING ---
             if step % 2 == 0 or step == len(cryo_loader) - 1:

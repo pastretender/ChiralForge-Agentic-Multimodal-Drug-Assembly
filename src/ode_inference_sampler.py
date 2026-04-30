@@ -5,6 +5,8 @@ import torch
 import einops
 from jaxtyping import Float
 
+from torch_geometric.nn import knn_graph
+
 # =============================================================================
 # 1. Dynamic Module Imports (Handles Numeric Filenames)
 # =============================================================================
@@ -20,7 +22,7 @@ def load_module_from_file(module_name: str, file_path: str):
     return module
 
 try:
-    mod_cfm = load_module_from_file("mod_cfm", "04_flow_matching_engine.py")
+    mod_cfm = load_module_from_file("mod_cfm", os.path.join(os.path.dirname(__file__), "flow_matching_engine.py"))
 except FileNotFoundError as e:
     print(f"Initialization Error: {e}")
     sys.exit(1)
@@ -54,28 +56,39 @@ def sample_molecule_euler(
     # STRICT REQUIREMENT: Using einops for safe dimensional expansion
     c_node: Float[torch.Tensor, "num_nodes c_dim"] = einops.repeat(c, '1 d -> n d', n=num_nodes)
 
-    # For a fully connected message passing graph during generation (without self-loops)
-    nodes = torch.arange(num_nodes, device=device)
-    edge_index = torch.cartesian_prod(nodes, nodes).t()
-    edge_index = edge_index[:, edge_index[0] != edge_index[1]]
-
     dt = 1.0 / num_steps
 
     # 2. ODE Integration Loop
     for step in range(num_steps):
         t_val = step * dt
 
+        # Dynamically compute kNN graph based on current spatial coordinates to scale linearly
+        # Fallback to fully-connected if num_nodes is smaller than k
+        k_neighbors = min(6, num_nodes - 1)
+        edge_index = knn_graph(pos, k=k_neighbors, loop=False)
+
         # Create node-level time tensor
         t_node: Float[torch.Tensor, "num_nodes 1"] = torch.full(
             (num_nodes, 1), t_val, device=device, dtype=torch.float32
         )
 
-        # 1. Conditioned Prediction
-        v_cond_r, v_cond_h = model(h=h, pos=pos, edge_index=edge_index, t_node=t_node, c_node=c_node)
-
-        # 2. Unconditioned Prediction
         c_uncond = torch.zeros_like(c_node)
-        v_uncond_r, v_uncond_h = model(h=h, pos=pos, edge_index=edge_index, t_node=t_node, c_node=c_uncond)
+
+        # Batch inputs for single forward pass
+        batched_h = torch.cat([h, h], dim=0)
+        batched_pos = torch.cat([pos, pos], dim=0)
+        batched_edge_index = torch.cat([edge_index, edge_index + num_nodes], dim=1)
+        batched_t_node = torch.cat([t_node, t_node], dim=0)
+        batched_c_node = torch.cat([c_node, c_uncond], dim=0)
+
+        # Single Forward Pass
+        batched_v_r, batched_v_h = model(
+            h=batched_h, pos=batched_pos, edge_index=batched_edge_index,
+            t_node=batched_t_node, c_node=batched_c_node
+        )
+
+        v_cond_r, v_uncond_r = torch.chunk(batched_v_r, 2, dim=0)
+        v_cond_h, v_uncond_h = torch.chunk(batched_v_h, 2, dim=0)
 
         # 3. Apply Classifier-Free Guidance (w = guidance_scale)
         w = 5.0 # Passed from agent
@@ -120,19 +133,32 @@ def sample_molecule_heun_constrained(
     c_node = einops.repeat(c, '1 d -> n d', n=num_nodes)
     c_uncond = torch.zeros_like(c_node) # For CFG
 
-    nodes = torch.arange(num_nodes, device=device)
-    edge_index = torch.cartesian_prod(nodes, nodes).t()
-    edge_index = edge_index[:, edge_index[0] != edge_index[1]]
-
     dt = 1.0 / num_steps
 
     def get_velocity(current_pos, current_h, t_val):
         t_node = torch.full((num_nodes, 1), t_val, device=device, dtype=torch.float32)
 
-        # Conditioned Forward Pass
-        v_cond_r, v_cond_h = model(h=current_h, pos=current_pos, edge_index=edge_index, t_node=t_node, c_node=c_node)
-        # Unconditioned Forward Pass
-        v_uncond_r, v_uncond_h = model(h=current_h, pos=current_pos, edge_index=edge_index, t_node=t_node, c_node=c_uncond)
+        # Dynamically compute kNN graph based on current spatial coordinates to scale linearly
+        # Fallback to fully-connected if num_nodes is smaller than k
+        k_neighbors = min(6, num_nodes - 1)
+        edge_index = knn_graph(current_pos, k=k_neighbors, loop=False)
+
+        # Combine conditional and unconditional inputs for a single forward pass
+        batched_h = torch.cat([current_h, current_h], dim=0)
+        batched_pos = torch.cat([current_pos, current_pos], dim=0)
+        batched_edge_index = torch.cat([edge_index, edge_index + num_nodes], dim=1)
+        batched_t_node = torch.cat([t_node, t_node], dim=0)
+        batched_c_node = torch.cat([c_node, c_uncond], dim=0)
+
+        # Single batched forward pass
+        batched_v_r, batched_v_h = model(
+            h=batched_h, pos=batched_pos, edge_index=batched_edge_index,
+            t_node=batched_t_node, c_node=batched_c_node
+        )
+
+        # Split features
+        v_cond_r, v_uncond_r = torch.chunk(batched_v_r, 2, dim=0)
+        v_cond_h, v_uncond_h = torch.chunk(batched_v_h, 2, dim=0)
 
         # Classifier-Free Guidance Extrapolation
         v_r = v_uncond_r + guidance_scale * (v_cond_r - v_uncond_r)
